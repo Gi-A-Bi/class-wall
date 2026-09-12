@@ -1,0 +1,65 @@
+// ===================================================
+// Firestore 보안 규칙
+//
+// 이 파일은 자동으로 적용되지 않습니다. 사람이 옮겨 붙여야 합니다.
+//   Firebase 콘솔 → Firestore Database → 규칙 →
+//   아래 내용을 통째로 붙여넣고 [게시] 를 누릅니다.
+//
+// 왜 이게 필요한가요?
+//   app.js 에서 버튼을 숨기는 것은 "안 보이게" 한 것뿐입니다.
+//   브라우저 개발자 도구를 열면 얼마든지 요청을 보낼 수 있습니다.
+//   진짜로 막아 주는 것은 서버에 있는 이 규칙입니다.
+//
+// 교사는 어떻게 정하나요?
+//   콘솔 → Firestore Database → 컬렉션 시작 → roles
+//   문서 ID 에 교사의 uid 를 적고, 필드 role 에 글자 teacher 를 넣습니다.
+//   (uid 는 콘솔 → Authentication → Users 에서 볼 수 있습니다)
+//   이 문서가 없는 사람은 모두 학생입니다.
+// ===================================================
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 로그인했는지 봅니다.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // 교사인지 봅니다. roles 칸에 teacher 라고 적힌 사람만 교사입니다.
+    function isTeacher() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/roles/$(request.auth.uid))
+        && get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == "teacher";
+    }
+
+    // --- 역할표 ---
+    // 자기 역할만 읽습니다. 고치는 것은 아무도 못 합니다. (콘솔에서만 합니다)
+    // 학생이 스스로 교사가 되는 일을 막습니다.
+    match /roles/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // --- 메모 ---
+    match /memos/{memoId} {
+
+      // 읽기: 로그인한 사람은 모두 담벼락을 봅니다.
+      allow read: if isSignedIn();
+
+      // 쓰기: 로그인한 사람이, 쓴 사람 자리에 자기 uid 를 적을 때만 됩니다.
+      // 남의 이름으로 메모를 쓰는 일을 막습니다.
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.text is string
+                    && request.resource.data.text.size() > 0
+                    && request.resource.data.text.size() <= 500;
+
+      // 고치기·지우기: 자기가 쓴 메모이거나, 교사일 때만 됩니다.
+      // 학생은 남의 메모를 건드리지 못합니다.
+      allow update, delete: if isSignedIn()
+                            && (resource.data.uid == request.auth.uid || isTeacher());
+    }
+  }
+}

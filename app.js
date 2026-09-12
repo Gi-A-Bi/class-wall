@@ -4,6 +4,7 @@
 // 메모가 Firestore(구글의 데이터 저장소)에 저장됩니다.
 // 이제 새로고침해도, 다른 기기에서 열어도 메모가 그대로 있습니다.
 // 구글 계정으로 로그인하면, 누가 쓴 메모인지도 함께 저장됩니다.
+// 교사는 모든 메모를, 학생은 자기 메모만 지울 수 있습니다.
 // ===================================================
 
 
@@ -17,6 +18,7 @@ import {
   query,
   orderBy,
   getDocs,
+  getDoc,
   addDoc,
   deleteDoc,
   doc,
@@ -35,7 +37,7 @@ import {
 
 // --- Firebase 설정 ---
 // 이 값들은 브라우저에 그대로 보입니다. 비밀번호가 아니라 "우리 프로젝트 주소"입니다.
-// 실제로 막아 주는 것은 Firestore 보안 규칙입니다. (백엔드 2 시간에 다룹니다)
+// 실제로 막아 주는 것은 Firestore 보안 규칙입니다. (firestore.rules 파일을 보세요)
 const firebaseConfig = {
   apiKey: "AIzaSyBGAI_ki6TIYZ0EWKCYj2uQQOkHAfX1m-c",
   authDomain: "class-wall-83e25.firebaseapp.com",
@@ -90,7 +92,8 @@ async function addMemo(text) {
 }
 
 // 메모를 지웁니다.
-// 백엔드 2: 지금은 누구든 남의 메모를 지울 수 있습니다. 이걸 막는 것이 과제입니다.
+// 남의 메모를 지우려고 하면 보안 규칙(firestore.rules)이 막아 줍니다.
+// 그때는 오류가 나면서 아래 catch 로 갑니다.
 async function deleteMemo(id) {
   await deleteDoc(doc(db, "memos", id));
 }
@@ -102,6 +105,15 @@ async function deleteMemo(id) {
 
 async function render() {
   const wall = document.getElementById("wall");
+
+  // 담벼락은 로그인한 사람만 볼 수 있습니다. (보안 규칙에 그렇게 적어 두었습니다)
+  if (currentUser === null) {
+    wall.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = "로그인하면 담벼락이 보입니다.";
+    wall.appendChild(p);
+    return;
+  }
 
   try {
     const memos = await loadMemos();          // 다 받아온 다음에
@@ -126,14 +138,28 @@ function makeMemo(memo) {
   const div = document.createElement("div");
   div.className = "memo";
 
-  const del = document.createElement("button");
-  del.textContent = "×";
-  del.addEventListener("click", async function () {
-    del.disabled = true;          // 두 번 눌려서 두 번 지워지는 일을 막습니다
-    await deleteMemo(memo.id);
-    await render();
-  });
-  div.appendChild(del);
+  // 지울 수 있는 사람에게만 × 버튼을 답니다.
+  if (canDelete(memo)) {
+    const del = document.createElement("button");
+    del.textContent = "×";
+
+    del.addEventListener("click", async function () {
+      del.disabled = true;        // 두 번 눌려서 두 번 지워지는 일을 막습니다
+
+      try {
+        await deleteMemo(memo.id);
+      } catch (e) {
+        // 규칙에 막히면 여기로 옵니다. (permission-denied)
+        alert("이 메모는 지울 수 없습니다: " + (e.code || e.message));
+        del.disabled = false;
+        return;
+      }
+
+      await render();
+    });
+
+    div.appendChild(del);
+  }
 
   const span = document.createElement("span");
   span.textContent = memo.text;
@@ -168,8 +194,14 @@ input.addEventListener("keydown", async function (e) {
     input.value = "";
     input.disabled = true;        // 저장하는 동안 잠깐 잠급니다
 
-    await addMemo(text);
-    await render();
+    try {
+      await addMemo(text);
+      await render();
+    } catch (e) {
+      alert("메모를 쓰지 못했습니다: " + (e.code || e.message));
+      input.value = text;         // 쓴 글이 사라지지 않게 돌려 놓습니다
+      console.error(e);
+    }
 
     input.disabled = false;
     input.focus();
@@ -189,6 +221,46 @@ const userArea = document.getElementById("userArea");
 
 // 지금 로그인한 사람입니다. 로그인 전에는 null 입니다.
 let currentUser = null;
+
+// 이 사람의 역할입니다. "teacher" 또는 "student", 로그인 전에는 null 입니다.
+let currentRole = null;
+
+
+// ===================================================
+// 교사와 학생 나누기
+//
+// 역할은 Firestore 의 roles 칸에 적혀 있습니다. 문서 이름이 그 사람의 uid 입니다.
+//   roles/{uid} 에 role: "teacher" 가 있으면 교사
+//   문서가 없으면 학생
+//
+// 이 칸은 Firebase 콘솔에서만 만듭니다. 앱에서는 읽기만 합니다.
+// 그래야 학생이 스스로 교사가 되는 일이 없습니다. (firestore.rules 를 보세요)
+// ===================================================
+
+async function loadRole(user) {
+  if (user === null) return null;
+
+  try {
+    const snap = await getDoc(doc(db, "roles", user.uid));
+    if (snap.exists() && snap.data().role === "teacher") return "teacher";
+  } catch (e) {
+    // 못 읽으면 학생으로 봅니다. 권한을 함부로 주지 않기 위해서입니다.
+    console.error(e);
+  }
+
+  return "student";
+}
+
+// 이 메모를 지울 수 있는 사람인지 봅니다.
+// 교사는 모든 메모를, 학생은 자기가 쓴 메모만 지웁니다.
+//
+// 여기서 하는 일은 버튼을 "안 보이게" 하는 것뿐입니다.
+// 진짜로 막아 주는 것은 서버에 있는 보안 규칙입니다. (firestore.rules)
+function canDelete(memo) {
+  if (currentUser === null) return false;
+  if (currentRole === "teacher") return true;
+  return memo.uid === currentUser.uid;
+}
 
 // 로그인 창을 띄웁니다.
 function login() {
@@ -220,7 +292,8 @@ function renderUserArea() {
   }
 
   const name = document.createElement("span");
-  name.textContent = currentUser.displayName + " 님 ";
+  const label = (currentRole === "teacher") ? "교사" : "학생";
+  name.textContent = currentUser.displayName + " 님 (" + label + ") ";
   userArea.appendChild(name);
 
   const logoutBtn = document.createElement("button");
@@ -252,8 +325,9 @@ function updateWriter() {
 // (지난번 로그인이 남아 있으면 로그인한 상태로, 없으면 null 로 들어옵니다)
 // ===================================================
 
-onAuthStateChanged(auth, function (user) {
-  currentUser = user;    // 로그인했으면 그 사람 정보, 로그아웃했으면 null
+onAuthStateChanged(auth, async function (user) {
+  currentUser = user;              // 로그인했으면 그 사람 정보, 로그아웃했으면 null
+  currentRole = await loadRole(user);   // 교사인지 학생인지 먼저 알아 옵니다
 
   renderUserArea();
   updateWriter();

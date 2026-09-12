@@ -14,4 +14,7 @@
 .DS_Store
 Thumbs.db
 
+# Firebase CLI가 만드는 파일
+.firebase/
+
 node_modules/
